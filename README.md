@@ -21,11 +21,6 @@ Assuming you have a working Go environment, installation is simply:
 
 The package documentation can be viewed online at
 http://godoc.org/github.com/torbit/cdb
-or on the command line by running `go doc github.com/torbit/cdb`.
+or on the command line by running `go doc github.com/torbit/cdb`
 
 The included self-test program `cdb_test.go` illustrates usage of the package.
-
-## Utilities
-
-The go-cdb package includes ports of the programs `cdbdump` and `cdbmake` from
-the [original implementation](http://cr.yp.to/cdb/cdbmake.html).
