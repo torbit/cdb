@@ -19,14 +19,30 @@ const (
 type Cdb struct {
 	r      io.ReaderAt
 	closer io.Closer
-	buf    []byte
-	loop   uint32 // number of hash slots searched under this key
-	khash  uint32 // initialized if loop is nonzero
-	kpos   uint32 // initialized if loop is nonzero
-	hpos   uint32 // initialized if loop is nonzero
-	hslots uint32 // initialized if loop is nonzero
-	dpos   uint32 // initialized if FindNext() returns true
-	dlen   uint32 // initialized if FindNext() returns true
+}
+
+type CdbIterator struct {
+	db *Cdb
+	// TODO: If iteration is exposed in the pkg interface, there needs to be a
+	// note explaining that the CdbIterator keeps a references to the key slice.
+	// If it is modified the iterator will stop working properly.
+	key []byte
+	// loop is the index of the next value for this iterator.
+	loop uint32
+	// khash is the hash of the key.
+	khash uint32
+	// kpos is the next file position in the hash to check for the key.
+	kpos uint32
+	// hpos is the file position of the hash table that this key is in.
+	hpos uint32
+	// hslots is the number of slots in the hash table.
+	hslots uint32
+	// dpos is the file position of the data. Only valid if the last call to next
+	// returned nil.
+	dpos uint32
+	// dlen is the length of the data. Only valid if the last call to next
+	// returned nil.
+	dlen uint32
 }
 
 // Open opens the named file read-only and returns a new Cdb object.  The file
@@ -54,109 +70,130 @@ func (c *Cdb) Close() (err error) {
 
 // New creates a new Cdb from the given ReaderAt, which should be a cdb format database.
 func New(r io.ReaderAt) *Cdb {
-	c := new(Cdb)
-	c.r = r
-	c.buf = make([]byte, 64)
-	return c
+	return &Cdb{r: r}
 }
 
-// Data returns the first data value for the given key.
-// If no such record exists, it returns EOF.
-func (c *Cdb) Data(key []byte) (data []byte, err error) {
-	c.FindStart()
-	if err = c.find(key); err != nil {
+// Bytes returns the first value for this key as a []byte. Returns EOF when
+// there is no value.
+//
+// Threadsafe.
+func (c *Cdb) Bytes(key []byte) ([]byte, error) {
+	return c.newIter(key).NextBytes()
+}
+
+// Reader returns the first value for this key as an io.SectionReader. Returns
+// EOF when there is no value.
+//
+// Threadsafe.
+func (c *Cdb) Reader(key []byte) (*io.SectionReader, error) {
+	return c.newIter(key).NextReader()
+}
+
+// Iterate returns an iterator that can be used to access all of the values for
+// a key. Always returns a non-nil value, even if the key has no values.
+//
+// Because the iterator keeps a reference to the byte slice, it shouldn't be
+// modified until the iterator is no longer in use.
+//
+// Threadsafe.
+func (c *Cdb) Iterate(key []byte) *CdbIterator {
+	return c.newIter(key)
+}
+
+func (c *Cdb) newIter(key []byte) *CdbIterator {
+	iter := new(CdbIterator)
+	iter.db = c
+	iter.key = key
+	// Calculate the hash of the key.
+	iter.khash = checksum(key)
+	// Read in the position and size of the hash table for this key.
+	iter.hpos, iter.hslots = c.readNums(iter.khash % 256 * 8)
+	// Calculate first possible file position of key.
+	hashslot := iter.khash / 256 % iter.hslots
+	iter.kpos = iter.hpos + hashslot*8
+	return iter
+}
+
+// NextBytes returns the next value for this iterator as a []byte. Returns EOF
+// when there are no values left.
+//
+// Not threadsafe.
+func (iter *CdbIterator) NextBytes() ([]byte, error) {
+	if err := iter.next(); err != nil {
 		return nil, err
 	}
-
-	data = make([]byte, c.dlen)
-	err = c.read(data, c.dpos)
-
-	return
-}
-
-// FindStart resets the cdb to search for the first record under a new key.
-func (c *Cdb) FindStart() { c.loop = 0 }
-
-// FindNext returns the next data value for the given key as a SectionReader.
-// If there are no more records for the given key, it returns EOF.
-// FindNext acts as an iterator: The iteration should be initialized by calling
-// FindStart and all subsequent calls to FindNext should use the same key value.
-func (c *Cdb) FindNext(key []byte) (rdata *io.SectionReader, err error) {
-	if err := c.find(key); err != nil {
+	data := make([]byte, iter.dlen)
+	if _, err := iter.db.r.ReadAt(data, int64(iter.dpos)); err != nil {
 		return nil, err
 	}
-	return io.NewSectionReader(c.r, int64(c.dpos), int64(c.dlen)), nil
+	return data, nil
 }
 
-// Find returns the first data value for the given key as a SectionReader.
-// Find is the same as FindStart followed by FindNext.
-func (c *Cdb) Find(key []byte) (rdata *io.SectionReader, err error) {
-	c.FindStart()
-	return c.FindNext(key)
+// NextReader returns the next value for this iterator as an io.SectionReader.
+// Returns EOF when there are no values left.
+//
+// Not threadsafe.
+func (iter *CdbIterator) NextReader() (*io.SectionReader, error) {
+	if err := iter.next(); err != nil {
+		return nil, err
+	}
+	return io.NewSectionReader(iter.db.r, int64(iter.dpos), int64(iter.dlen)), nil
 }
 
-func (c *Cdb) find(key []byte) (err error) {
+// next iterates through the hash table until it finds the next match. If no
+// matches are found, returns EOF.
+//
+// When a match is found dpos and dlen can be used to retreive the data.
+func (iter *CdbIterator) next() (err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			err = e.(error)
 		}
 	}()
-
-	var pos, h uint32
-
-	klen := uint32(len(key))
-	if c.loop == 0 {
-		h = checksum(key)
-		c.hpos, c.hslots = c.readNums((h << 3) & 2047)
-		if c.hslots == 0 {
-			return
-		}
-		c.khash = h
-		h >>= 8
-		h %= c.hslots
-		h <<= 3
-		c.kpos = c.hpos + h
-	}
-
-	for c.loop < c.hslots {
-		h, pos = c.readNums(c.kpos)
-		if pos == 0 {
+	var khash, recPos uint32
+	// Iterate through all of the hash slots until we find our key.
+	for {
+		// If we have seen every hash slot, we are done.
+		if iter.loop >= iter.hslots {
 			return io.EOF
 		}
-		c.loop++
-		c.kpos += 8
-		if c.kpos == c.hpos+(c.hslots<<3) {
-			c.kpos = c.hpos
+		khash, recPos = iter.db.readNums(iter.kpos)
+		if recPos == 0 {
+			return io.EOF
 		}
-		if h == c.khash {
-			rklen, rdlen := c.readNums(pos)
-			if rklen == klen {
-				if c.match(key, pos+8) {
-					c.dlen = rdlen
-					c.dpos = pos + 8 + klen
-					return nil
-				}
-			}
+		// Move the iterator to the next position.
+		iter.loop++
+		iter.kpos += 8
+		// If the kpos goes past the end of the hash table, wrap around to the start.
+		if iter.kpos == iter.hpos+(iter.hslots*8) {
+			iter.kpos = iter.hpos
 		}
+		// If the key hash doesn't match, this hash slot isn't for our key. Keep iterating.
+		if khash != iter.khash {
+			continue
+		}
+		keyLen, dataLen := iter.db.readNums(recPos)
+		// Check that the keys actually match in case of a hash collision.
+		if keyLen != uint32(len(iter.key)) || iter.db.match(iter.key, recPos+8) == false {
+			continue
+		}
+		iter.dpos = recPos + 8 + keyLen
+		iter.dlen = dataLen
+		return nil
 	}
-
-	return io.EOF
+	panic("unreached")
 }
 
-func (c *Cdb) read(buf []byte, pos uint32) error {
-	_, err := c.r.ReadAt(buf, int64(pos))
-	return err
-}
-
+// match returns true if the data at file position pos matches key.
 func (c *Cdb) match(key []byte, pos uint32) bool {
-	buf := c.buf
+	buf := make([]byte, 64)
 	klen := len(key)
 	for n := 0; n < klen; n += len(buf) {
 		nleft := klen - n
 		if len(buf) > nleft {
 			buf = buf[:nleft]
 		}
-		if err := c.read(buf, pos); err != nil {
+		if _, err := c.r.ReadAt(buf, int64(pos)); err != nil {
 			panic(err)
 		}
 		if !bytes.Equal(buf, key[n:n+len(buf)]) {
@@ -168,8 +205,9 @@ func (c *Cdb) match(key []byte, pos uint32) bool {
 }
 
 func (c *Cdb) readNums(pos uint32) (uint32, uint32) {
-	if _, err := c.r.ReadAt(c.buf[:8], int64(pos)); err != nil {
+	var buf [8]byte
+	if _, err := c.r.ReadAt(buf[:], int64(pos)); err != nil {
 		panic(err)
 	}
-	return binary.LittleEndian.Uint32(c.buf), binary.LittleEndian.Uint32(c.buf[4:])
+	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:])
 }

@@ -45,7 +45,7 @@ func TestCdb(t *testing.T) {
 		key := []byte(rec.key)
 		values := rec.values
 
-		v, err := c.Data(key)
+		v, err := c.Bytes(key)
 		if err != nil {
 			t.Fatalf("Record read failed: %s", err)
 		}
@@ -54,9 +54,9 @@ func TestCdb(t *testing.T) {
 			t.Fatal("Incorrect value returned")
 		}
 
-		c.FindStart()
+		iter := c.Iterate(key)
 		for _, value := range values {
-			sr, err := c.FindNext(key)
+			sr, err := iter.NextReader()
 			if err != nil {
 				t.Fatalf("Record read failed: %s", err)
 			}
@@ -72,7 +72,7 @@ func TestCdb(t *testing.T) {
 			}
 		}
 		// Read all values, so should get EOF
-		_, err = c.FindNext(key)
+		_, err = iter.NextReader()
 		if err != io.EOF {
 			t.Fatalf("Expected EOF, got %s", err)
 		}
