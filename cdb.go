@@ -23,6 +23,8 @@ type Cdb struct {
 
 type CdbIterator struct {
 	db *Cdb
+	// initErr is non-nil if an error happened when the iterator was created.
+	initErr error
 	// TODO: If iteration is exposed in the pkg interface, there needs to be a
 	// note explaining that the CdbIterator keeps a references to the key slice.
 	// If it is modified the iterator will stop working properly.
@@ -78,7 +80,7 @@ func New(r io.ReaderAt) *Cdb {
 //
 // Threadsafe.
 func (c *Cdb) Bytes(key []byte) ([]byte, error) {
-	return c.newIter(key).NextBytes()
+	return c.Iterate(key).NextBytes()
 }
 
 // Reader returns the first value for this key as an io.SectionReader. Returns
@@ -86,7 +88,7 @@ func (c *Cdb) Bytes(key []byte) ([]byte, error) {
 //
 // Threadsafe.
 func (c *Cdb) Reader(key []byte) (*io.SectionReader, error) {
-	return c.newIter(key).NextReader()
+	return c.Iterate(key).NextReader()
 }
 
 // Iterate returns an iterator that can be used to access all of the values for
@@ -96,22 +98,28 @@ func (c *Cdb) Reader(key []byte) (*io.SectionReader, error) {
 // modified until the iterator is no longer in use.
 //
 // Threadsafe.
-func (c *Cdb) Iterate(key []byte) *CdbIterator {
-	return c.newIter(key)
-}
-
-func (c *Cdb) newIter(key []byte) *CdbIterator {
-	iter := new(CdbIterator)
+func (c *Cdb) Iterate(key []byte) (iter *CdbIterator) {
+	iter = new(CdbIterator)
+	defer func() {
+		if e := recover(); e != nil {
+			iter.initErr = e.(error)
+		}
+	}()
 	iter.db = c
 	iter.key = key
 	// Calculate the hash of the key.
 	iter.khash = checksum(key)
 	// Read in the position and size of the hash table for this key.
 	iter.hpos, iter.hslots = c.readNums(iter.khash % 256 * 8)
+	// If the hash table has no slots, there are no values.
+	if iter.hslots == 0 {
+		iter.initErr = io.EOF
+		return
+	}
 	// Calculate first possible file position of key.
 	hashslot := iter.khash / 256 % iter.hslots
 	iter.kpos = iter.hpos + hashslot*8
-	return iter
+	return
 }
 
 // NextBytes returns the next value for this iterator as a []byte. Returns EOF
@@ -150,6 +158,9 @@ func (iter *CdbIterator) next() (err error) {
 			err = e.(error)
 		}
 	}()
+	if iter.initErr != nil {
+		return iter.initErr
+	}
 	var khash, recPos uint32
 	// Iterate through all of the hash slots until we find our key.
 	for {
@@ -206,7 +217,9 @@ func (c *Cdb) match(key []byte, pos uint32) bool {
 
 func (c *Cdb) readNums(pos uint32) (uint32, uint32) {
 	var buf [8]byte
-	if _, err := c.r.ReadAt(buf[:], int64(pos)); err != nil {
+	n, err := c.r.ReadAt(buf[:], int64(pos))
+	// Ignore EOFs when we have read the full 8 bytes.
+	if err != nil && (err != io.EOF || n < 8) {
 		panic(err)
 	}
 	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:])

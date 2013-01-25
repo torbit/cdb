@@ -94,6 +94,62 @@ func TestCdb(t *testing.T) {
 	}
 }
 
+func TestNotFound(t *testing.T) {
+	db := newDB()
+	b, err := db.Bytes([]byte("asdf"))
+	if err != io.EOF {
+		t.Errorf("err: expected EOF, got: %v", err)
+	}
+	if b != nil {
+		t.Errorf("b: expected nil, got: %s", b)
+	}
+}
+
+func TestBytes(t *testing.T) {
+	db := newDB()
+	b, err := db.Bytes([]byte("one"))
+	if err != nil {
+		t.Errorf("Bytes error: %v", err)
+	}
+	if !bytes.Equal(b, []byte("1")) {
+		t.Errorf("b: expected 1, got: %s", b)
+	}
+}
+
+func TestReader(t *testing.T) {
+	db := newDB()
+	r, err := db.Reader([]byte("one"))
+	if err != nil {
+		t.Errorf("Reader error: %v", err)
+	}
+	b, err := ioutil.ReadAll(r)
+	if err != nil {
+		t.Errorf("ReadAll error: %v", err)
+	}
+	if !bytes.Equal(b, []byte("1")) {
+		t.Errorf("b: expected 1, got: %s", b)
+	}
+}
+
+func newDB() *Cdb {
+	tmp, err := ioutil.TempFile("", "")
+	if err != nil {
+		panic(err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := Make(tmp, bytes.NewReader(data)); err != nil {
+		panic(err)
+	}
+	if _, err = tmp.Seek(0, 0); err != nil {
+		panic(err)
+	}
+	b, err := ioutil.ReadAll(tmp)
+	if err != nil {
+		panic(err)
+	}
+	return New(bytes.NewReader(b))
+}
+
 func init() {
 	b := bytes.NewBuffer(nil)
 	for _, rec := range records {
