@@ -25,8 +25,6 @@ type CdbIterator struct {
 	db *Cdb
 	// initErr is non-nil if an error happened when the iterator was created.
 	initErr error
-	// TODO: If iteration is exposed in the pkg interface, there needs to be a
-	// note explaining that the CdbIterator keeps a references to the key slice.
 	// If it is modified the iterator will stop working properly.
 	key []byte
 	// loop is the index of the next value for this iterator.
