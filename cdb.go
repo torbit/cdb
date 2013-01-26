@@ -193,13 +193,13 @@ func (iter *CdbIterator) next() (err error) {
 	panic("unreached")
 }
 
-// ForEach calls onRecordFn for every key-val pair in the database.
+// ForEachReader calls onRecordFn for every key-val pair in the database.
 //
 // If onRecordFn returns an error, iteration will stop and the error will be
-// returned from ForEach.
+// returned.
 //
 // Threadsafe.
-func (c *Cdb) ForEach(onRecordFn func(key, val []byte) error) (err error) {
+func (c *Cdb) ForEachReader(onRecordFn func(keyReader, valReader *io.SectionReader) error) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			err = e.(error)
@@ -209,32 +209,54 @@ func (c *Cdb) ForEach(onRecordFn func(key, val []byte) error) (err error) {
 	pos := headerSize
 	// The end is the start of the first hash table.
 	end, _ := c.readNums(0)
-	var kbuf, dbuf []byte
 	for pos < end {
-		// Correctly size the buffers.
 		klen, dlen := c.readNums(pos)
-		if uint32(cap(kbuf)) < klen {
-			kbuf = make([]byte, klen)
-		}
-		if uint32(cap(dbuf)) < dlen {
-			dbuf = make([]byte, dlen)
-		}
-		kbuf, dbuf = kbuf[:klen], dbuf[:dlen]
-		// Read in the bytes.
-		if _, err := c.r.ReadAt(kbuf, int64(pos+8)); err != nil {
-			return err
-		}
-		if _, err := c.r.ReadAt(dbuf, int64(pos+8+klen)); err != nil {
-			return err
-		}
+		// Create readers that point directly to sections of the underlying reader.
+		keyReader := io.NewSectionReader(c.r, int64(pos+8), int64(klen))
+		dataReader := io.NewSectionReader(c.r, int64(pos+8+klen), int64(dlen))
 		// Send them to the callback.
-		if err := onRecordFn(kbuf, dbuf); err != nil {
+		if err := onRecordFn(keyReader, dataReader); err != nil {
 			return err
 		}
 		// Move to the next record.
 		pos += 8 + klen + dlen
 	}
 	return nil
+}
+
+// ForEachBytes calls onRecordFn for every key-val pair in the database.
+//
+// The byte slices are only valid for the length of a call to onRecordFn.
+//
+// If onRecordFn returns an error, iteration will stop and the error will be
+// returned.
+//
+// Threadsafe.
+func (c *Cdb) ForEachBytes(onRecordFn func(key, val []byte) error) error {
+	var kbuf, dbuf []byte
+	return c.ForEachReader(func(keyReader, valReader *io.SectionReader) error {
+		// Correctly size the buffers.
+		klen, dlen := keyReader.Size(), valReader.Size()
+		if int64(cap(kbuf)) < klen {
+			kbuf = make([]byte, klen)
+		}
+		if int64(cap(dbuf)) < dlen {
+			dbuf = make([]byte, dlen)
+		}
+		kbuf, dbuf = kbuf[:klen], dbuf[:dlen]
+		// Read in the bytes.
+		if _, err := io.ReadFull(keyReader, kbuf); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(valReader, dbuf); err != nil {
+			return err
+		}
+		// Send them to the callback.
+		if err := onRecordFn(kbuf, dbuf); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // match returns true if the data at file position pos matches key.

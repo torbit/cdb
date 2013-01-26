@@ -145,7 +145,7 @@ func TestForEach(t *testing.T) {
 	}
 	db := newDB(records)
 	i := 0
-	err := db.ForEach(func(key, val []byte) error {
+	err := db.ForEachBytes(func(key, val []byte) error {
 		defer func() { i++ }()
 		if i >= len(cases) {
 			return nil
