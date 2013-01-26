@@ -130,6 +130,9 @@ func (iter *CdbIterator) NextBytes() ([]byte, error) {
 	}
 	data := make([]byte, iter.dlen)
 	if _, err := iter.db.r.ReadAt(data, int64(iter.dpos)); err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
 		return nil, err
 	}
 	return data, nil
@@ -283,7 +286,13 @@ func (c *Cdb) readNums(pos uint32) (uint32, uint32) {
 	var buf [8]byte
 	n, err := c.r.ReadAt(buf[:], int64(pos))
 	// Ignore EOFs when we have read the full 8 bytes.
-	if err != nil && (err != io.EOF || n < 8) {
+	if err == io.EOF && n == 8 {
+		err = nil
+	}
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
 		panic(err)
 	}
 	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:])
