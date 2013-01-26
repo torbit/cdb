@@ -95,7 +95,7 @@ func TestCdb(t *testing.T) {
 }
 
 func TestNotFound(t *testing.T) {
-	db := newDB()
+	db := newDB(records)
 	b, err := db.Bytes([]byte("asdf"))
 	if err != io.EOF {
 		t.Errorf("err: expected EOF, got: %v", err)
@@ -106,7 +106,7 @@ func TestNotFound(t *testing.T) {
 }
 
 func TestBytes(t *testing.T) {
-	db := newDB()
+	db := newDB(records)
 	b, err := db.Bytes([]byte("one"))
 	if err != nil {
 		t.Errorf("Bytes error: %v", err)
@@ -117,7 +117,7 @@ func TestBytes(t *testing.T) {
 }
 
 func TestReader(t *testing.T) {
-	db := newDB()
+	db := newDB(records)
 	r, err := db.Reader([]byte("one"))
 	if err != nil {
 		t.Errorf("Reader error: %v", err)
@@ -131,13 +131,55 @@ func TestReader(t *testing.T) {
 	}
 }
 
-func newDB() *Cdb {
+func TestForEach(t *testing.T) {
+	type TestCase struct {
+		Key, Val string
+	}
+	cases := []TestCase{
+		{"one", "1"},
+		{"two", "2"},
+		{"two", "22"},
+		{"three", "3"},
+		{"three", "33"},
+		{"three", "333"},
+	}
+	db := newDB(records)
+	i := 0
+	err := db.ForEach(func(key, val []byte) {
+		if i >= len(cases) {
+			return
+		}
+		if !bytes.Equal(key, []byte(cases[i].Key)) {
+			t.Errorf("case %v: expected key %s, got: %s", i, cases[i].Key, key)
+		}
+		if !bytes.Equal(val, []byte(cases[i].Val)) {
+			t.Errorf("case %v: expected val %s, got: %s", i, cases[i].Val, val)
+		}
+		i++
+	})
+	if err != nil {
+		t.Errorf("ForEach error: %v", err)
+	}
+	if i != len(cases) {
+		t.Errorf("ForEach callback called the wrong number of times: expected %v, got: %v", len(cases), i)
+	}
+}
+
+func newDB(recs []rec) *Cdb {
 	tmp, err := ioutil.TempFile("", "")
 	if err != nil {
 		panic(err)
 	}
 	defer os.Remove(tmp.Name())
-	if err := Make(tmp, bytes.NewReader(data)); err != nil {
+	w := NewWriter(tmp)
+	for _, record := range recs {
+		for _, val := range record.values {
+			if err := w.Write([]byte(record.key), []byte(val)); err != nil {
+				panic(err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
 		panic(err)
 	}
 	if _, err = tmp.Seek(0, 0); err != nil {

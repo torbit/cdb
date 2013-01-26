@@ -193,6 +193,45 @@ func (iter *CdbIterator) next() (err error) {
 	panic("unreached")
 }
 
+// ForEach calls onRecordFn for every key-val pair in the database.
+//
+// Threadsafe.
+func (c *Cdb) ForEach(onRecordFn func(key, val []byte)) (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = e.(error)
+		}
+	}()
+	// The start is the first record after the header.
+	pos := headerSize
+	// The end is the start of the first hash table.
+	end, _ := c.readNums(0)
+	var kbuf, dbuf []byte
+	for pos < end {
+		// Correctly size the buffers.
+		klen, dlen := c.readNums(pos)
+		if uint32(cap(kbuf)) < klen {
+			kbuf = make([]byte, klen)
+		}
+		if uint32(cap(dbuf)) < dlen {
+			dbuf = make([]byte, dlen)
+		}
+		kbuf, dbuf = kbuf[:klen], dbuf[:dlen]
+		// Read in the bytes.
+		if _, err := c.r.ReadAt(kbuf, int64(pos+8)); err != nil {
+			return err
+		}
+		if _, err := c.r.ReadAt(dbuf, int64(pos+8+klen)); err != nil {
+			return err
+		}
+		// Send them to the callback.
+		onRecordFn(kbuf, dbuf)
+		// Move to the next record.
+		pos += 8 + klen + dlen
+	}
+	return nil
+}
+
 // match returns true if the data at file position pos matches key.
 func (c *Cdb) match(key []byte, pos uint32) bool {
 	buf := make([]byte, 64)
