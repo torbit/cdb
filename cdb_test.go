@@ -146,6 +146,7 @@ func TestForEach(t *testing.T) {
 	db := newDB(records)
 	i := 0
 	err := db.ForEach(func(key, val []byte) {
+		defer func() { i++ }()
 		if i >= len(cases) {
 			return
 		}
@@ -155,7 +156,6 @@ func TestForEach(t *testing.T) {
 		if !bytes.Equal(val, []byte(cases[i].Val)) {
 			t.Errorf("case %v: expected val %s, got: %s", i, cases[i].Val, val)
 		}
-		i++
 	})
 	if err != nil {
 		t.Errorf("ForEach error: %v", err)
