@@ -195,8 +195,11 @@ func (iter *CdbIterator) next() (err error) {
 
 // ForEach calls onRecordFn for every key-val pair in the database.
 //
+// If onRecordFn returns an error, iteration will stop and the error will be
+// returned from ForEach.
+//
 // Threadsafe.
-func (c *Cdb) ForEach(onRecordFn func(key, val []byte)) (err error) {
+func (c *Cdb) ForEach(onRecordFn func(key, val []byte) error) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			err = e.(error)
@@ -225,7 +228,9 @@ func (c *Cdb) ForEach(onRecordFn func(key, val []byte)) (err error) {
 			return err
 		}
 		// Send them to the callback.
-		onRecordFn(kbuf, dbuf)
+		if err := onRecordFn(kbuf, dbuf); err != nil {
+			return err
+		}
 		// Move to the next record.
 		pos += 8 + klen + dlen
 	}
