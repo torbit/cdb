@@ -43,6 +43,8 @@ type CdbIterator struct {
 	// dlen is the length of the data. Only valid if the last call to next
 	// returned nil.
 	dlen uint32
+	// buf is used as scratch space for io.
+	buf [64]byte
 }
 
 // Open opens the named file read-only and returns a new Cdb object.  The file
@@ -108,7 +110,7 @@ func (c *Cdb) Iterate(key []byte) (iter *CdbIterator) {
 	// Calculate the hash of the key.
 	iter.khash = checksum(key)
 	// Read in the position and size of the hash table for this key.
-	iter.hpos, iter.hslots = c.readNums(iter.khash % 256 * 8)
+	iter.hpos, iter.hslots = readNums(iter.db.r, iter.buf[:], iter.khash%256*8)
 	// If the hash table has no slots, there are no values.
 	if iter.hslots == 0 {
 		iter.initErr = io.EOF
@@ -169,7 +171,7 @@ func (iter *CdbIterator) next() (err error) {
 		if iter.loop >= iter.hslots {
 			return io.EOF
 		}
-		khash, recPos = iter.db.readNums(iter.kpos)
+		khash, recPos = readNums(iter.db.r, iter.buf[:], iter.kpos)
 		if recPos == 0 {
 			return io.EOF
 		}
@@ -184,9 +186,9 @@ func (iter *CdbIterator) next() (err error) {
 		if khash != iter.khash {
 			continue
 		}
-		keyLen, dataLen := iter.db.readNums(recPos)
+		keyLen, dataLen := readNums(iter.db.r, iter.buf[:], recPos)
 		// Check that the keys actually match in case of a hash collision.
-		if keyLen != uint32(len(iter.key)) || iter.db.match(iter.key, recPos+8) == false {
+		if keyLen != uint32(len(iter.key)) || match(iter.db.r, iter.buf[:], iter.key, recPos+8) == false {
 			continue
 		}
 		iter.dpos = recPos + 8 + keyLen
@@ -208,12 +210,13 @@ func (c *Cdb) ForEachReader(onRecordFn func(keyReader, valReader *io.SectionRead
 			err = e.(error)
 		}
 	}()
+	buf := make([]byte, 8)
 	// The start is the first record after the header.
 	pos := headerSize
 	// The end is the start of the first hash table.
-	end, _ := c.readNums(0)
+	end, _ := readNums(c.r, buf, 0)
 	for pos < end {
-		klen, dlen := c.readNums(pos)
+		klen, dlen := readNums(c.r, buf, pos)
 		// Create readers that point directly to sections of the underlying reader.
 		keyReader := io.NewSectionReader(c.r, int64(pos+8), int64(klen))
 		dataReader := io.NewSectionReader(c.r, int64(pos+8+klen), int64(dlen))
@@ -263,15 +266,14 @@ func (c *Cdb) ForEachBytes(onRecordFn func(key, val []byte) error) error {
 }
 
 // match returns true if the data at file position pos matches key.
-func (c *Cdb) match(key []byte, pos uint32) bool {
-	buf := make([]byte, 64)
+func match(r io.ReaderAt, buf []byte, key []byte, pos uint32) bool {
 	klen := len(key)
 	for n := 0; n < klen; n += len(buf) {
 		nleft := klen - n
 		if len(buf) > nleft {
 			buf = buf[:nleft]
 		}
-		if _, err := c.r.ReadAt(buf, int64(pos)); err != nil {
+		if _, err := r.ReadAt(buf, int64(pos)); err != nil {
 			panic(err)
 		}
 		if !bytes.Equal(buf, key[n:n+len(buf)]) {
@@ -282,9 +284,8 @@ func (c *Cdb) match(key []byte, pos uint32) bool {
 	return true
 }
 
-func (c *Cdb) readNums(pos uint32) (uint32, uint32) {
-	var buf [8]byte
-	n, err := c.r.ReadAt(buf[:], int64(pos))
+func readNums(r io.ReaderAt, buf []byte, pos uint32) (uint32, uint32) {
+	n, err := r.ReadAt(buf[:8], int64(pos))
 	// Ignore EOFs when we have read the full 8 bytes.
 	if err == io.EOF && n == 8 {
 		err = nil
@@ -295,5 +296,5 @@ func (c *Cdb) readNums(pos uint32) (uint32, uint32) {
 	if err != nil {
 		panic(err)
 	}
-	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:])
+	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:8])
 }
