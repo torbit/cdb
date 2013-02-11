@@ -166,7 +166,7 @@ func TestForEach(t *testing.T) {
 	}
 }
 
-func newDB(recs []rec) *Cdb {
+func newDBBytes(recs []rec) []byte {
 	tmp, err := ioutil.TempFile("", "")
 	if err != nil {
 		panic(err)
@@ -190,7 +190,11 @@ func newDB(recs []rec) *Cdb {
 	if err != nil {
 		panic(err)
 	}
-	return New(bytes.NewReader(b))
+	return b
+}
+
+func newDB(recs []rec) *Cdb {
+	return New(bytes.NewReader(newDBBytes(recs)))
 }
 
 func init() {
