@@ -98,28 +98,26 @@ func (c *Cdb) Reader(key []byte) (*io.SectionReader, error) {
 // modified until the iterator is no longer in use.
 //
 // Threadsafe.
-func (c *Cdb) Iterate(key []byte) (iter *CdbIterator) {
-	iter = new(CdbIterator)
-	defer func() {
-		if e := recover(); e != nil {
-			iter.initErr = e.(error)
-		}
-	}()
+func (c *Cdb) Iterate(key []byte) *CdbIterator {
+	iter := new(CdbIterator)
 	iter.db = c
 	iter.key = key
 	// Calculate the hash of the key.
 	iter.khash = checksum(key)
 	// Read in the position and size of the hash table for this key.
-	iter.hpos, iter.hslots = readNums(iter.db.r, iter.buf[:], iter.khash%256*8)
+	iter.hpos, iter.hslots, iter.initErr = readNums(iter.db.r, iter.buf[:], iter.khash%256*8)
+	if iter.initErr != nil {
+		return iter
+	}
 	// If the hash table has no slots, there are no values.
 	if iter.hslots == 0 {
 		iter.initErr = io.EOF
-		return
+		return iter
 	}
 	// Calculate first possible file position of key.
 	hashslot := iter.khash / 256 % iter.hslots
 	iter.kpos = iter.hpos + hashslot*8
-	return
+	return iter
 }
 
 // NextBytes returns the next value for this iterator as a []byte. Returns EOF
@@ -155,15 +153,11 @@ func (iter *CdbIterator) NextReader() (*io.SectionReader, error) {
 // matches are found, returns EOF.
 //
 // When a match is found dpos and dlen can be used to retreive the data.
-func (iter *CdbIterator) next() (err error) {
-	defer func() {
-		if e := recover(); e != nil {
-			err = e.(error)
-		}
-	}()
+func (iter *CdbIterator) next() error {
 	if iter.initErr != nil {
 		return iter.initErr
 	}
+	var err error
 	var khash, recPos uint32
 	// Iterate through all of the hash slots until we find our key.
 	for {
@@ -171,7 +165,10 @@ func (iter *CdbIterator) next() (err error) {
 		if iter.loop >= iter.hslots {
 			return io.EOF
 		}
-		khash, recPos = readNums(iter.db.r, iter.buf[:], iter.kpos)
+		khash, recPos, err = readNums(iter.db.r, iter.buf[:], iter.kpos)
+		if err != nil {
+			return err
+		}
 		if recPos == 0 {
 			return io.EOF
 		}
@@ -186,9 +183,17 @@ func (iter *CdbIterator) next() (err error) {
 		if khash != iter.khash {
 			continue
 		}
-		keyLen, dataLen := readNums(iter.db.r, iter.buf[:], recPos)
+		keyLen, dataLen, err := readNums(iter.db.r, iter.buf[:], recPos)
+		if err != nil {
+			return err
+		}
 		// Check that the keys actually match in case of a hash collision.
-		if keyLen != uint32(len(iter.key)) || match(iter.db.r, iter.buf[:], iter.key, recPos+8) == false {
+		if keyLen != uint32(len(iter.key)) {
+			continue
+		}
+		if isMatch, err := match(iter.db.r, iter.buf[:], iter.key, recPos+8); err != nil {
+			return err
+		} else if isMatch == false {
 			continue
 		}
 		iter.dpos = recPos + 8 + keyLen
@@ -204,19 +209,20 @@ func (iter *CdbIterator) next() (err error) {
 // returned.
 //
 // Threadsafe.
-func (c *Cdb) ForEachReader(onRecordFn func(keyReader, valReader *io.SectionReader) error) (err error) {
-	defer func() {
-		if e := recover(); e != nil {
-			err = e.(error)
-		}
-	}()
+func (c *Cdb) ForEachReader(onRecordFn func(keyReader, valReader *io.SectionReader) error) error {
 	buf := make([]byte, 8)
 	// The start is the first record after the header.
 	pos := headerSize
 	// The end is the start of the first hash table.
-	end, _ := readNums(c.r, buf, 0)
+	end, _, err := readNums(c.r, buf, 0)
+	if err != nil {
+		return err
+	}
 	for pos < end {
-		klen, dlen := readNums(c.r, buf, pos)
+		klen, dlen, err := readNums(c.r, buf, pos)
+		if err != nil {
+			return err
+		}
 		// Create readers that point directly to sections of the underlying reader.
 		keyReader := io.NewSectionReader(c.r, int64(pos+8), int64(klen))
 		dataReader := io.NewSectionReader(c.r, int64(pos+8+klen), int64(dlen))
@@ -266,7 +272,7 @@ func (c *Cdb) ForEachBytes(onRecordFn func(key, val []byte) error) error {
 }
 
 // match returns true if the data at file position pos matches key.
-func match(r io.ReaderAt, buf []byte, key []byte, pos uint32) bool {
+func match(r io.ReaderAt, buf []byte, key []byte, pos uint32) (bool, error) {
 	klen := len(key)
 	for n := 0; n < klen; n += len(buf) {
 		nleft := klen - n
@@ -274,17 +280,17 @@ func match(r io.ReaderAt, buf []byte, key []byte, pos uint32) bool {
 			buf = buf[:nleft]
 		}
 		if _, err := r.ReadAt(buf, int64(pos)); err != nil {
-			panic(err)
+			return false, err
 		}
 		if !bytes.Equal(buf, key[n:n+len(buf)]) {
-			return false
+			return false, nil
 		}
 		pos += uint32(len(buf))
 	}
-	return true
+	return true, nil
 }
 
-func readNums(r io.ReaderAt, buf []byte, pos uint32) (uint32, uint32) {
+func readNums(r io.ReaderAt, buf []byte, pos uint32) (uint32, uint32, error) {
 	n, err := r.ReadAt(buf[:8], int64(pos))
 	// Ignore EOFs when we have read the full 8 bytes.
 	if err == io.EOF && n == 8 {
@@ -294,7 +300,7 @@ func readNums(r io.ReaderAt, buf []byte, pos uint32) (uint32, uint32) {
 		err = io.ErrUnexpectedEOF
 	}
 	if err != nil {
-		panic(err)
+		return 0, 0, err
 	}
-	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:8])
+	return binary.LittleEndian.Uint32(buf[:4]), binary.LittleEndian.Uint32(buf[4:8]), nil
 }
