@@ -75,6 +75,20 @@ func New(r io.ReaderAt) *Cdb {
 	return &Cdb{r: r}
 }
 
+// Exists returns true if there are any values for this key.
+//
+// Threadsafe.
+func (c *Cdb) Exists(key []byte) (bool, error) {
+	err := c.Iterate(key).next()
+	if err == io.EOF {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Bytes returns the first value for this key as a []byte. Returns EOF when
 // there is no value.
 //
